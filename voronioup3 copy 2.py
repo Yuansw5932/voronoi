@@ -47,7 +47,7 @@ class PointDrawerApp:
 
         self.btn1 = tk.Button(button_frame, text="載入下一個測試案例", command=self.load_next_test_data)
         self.btn1.pack(side=tk.LEFT, padx=5)
-        
+
         self.btn2 = tk.Button(button_frame, text="分割與排序", command=self.process_and_draw_points)
         self.btn2.pack(side=tk.LEFT, padx=5)
 
@@ -92,10 +92,8 @@ class PointDrawerApp:
 
     def reset_voronoi_state(self):
         """重置所有計算狀態"""
-        self.first = True
         self.left_half_points = []
         self.right_half_points = []
-        self.sorted_points=[]
         self.left_hull = None
         self.right_hull = None
         self.left_voronoi_edges = []
@@ -253,15 +251,13 @@ class PointDrawerApp:
         
         x_sorted = sorted(vertices, key=lambda v: (v.x, v.y)); mid = len(x_sorted) // 2
         self.left_half_points, self.right_half_points = x_sorted[:mid], x_sorted[mid:]
-        self.sorted_points = x_sorted
         divider_x = (self.left_half_points[-1].x + self.right_half_points[0].x) / 2.0
         self.draw_edge_on_canvas(Edge(-100, Vertex(-98, divider_x, 0), Vertex(-99, divider_x, 600)), "blue", 2, (5, 3), "divider")
         self.left_hull = self.sort_vertices_by_angle(self.left_half_points); self.right_hull = self.sort_vertices_by_angle(self.right_half_points)
         for i, v in enumerate(self.left_hull): self.canvas.create_text(*self.logical_to_tk_coords(v.x, v.y+5), text=f"L{i}", fill="green", font=("Arial", 10, "bold"))
         for i, v in enumerate(self.right_hull): self.canvas.create_text(*self.logical_to_tk_coords(v.x, v.y+5), text=f"R{i}", fill="purple", font=("Arial", 10, "bold"))
-        self.voronoi_recursive(x_sorted)
+        self.merge_phase = 'ready_to_merge'; print("已完成分割與排序，準備合併。")
 
-           
     def next_step_action(self):
         actions = {
             'idle': lambda: print("請先點擊「分割與排序」。"),
@@ -273,43 +269,6 @@ class PointDrawerApp:
         }
         actions.get(self.merge_phase, lambda: None)()
 
-    def voronoi_recursive(self, vertices):
-    
-        num_vertices = len(vertices)
-        
-        if len(vertices) <= 3: self.left_voronoi_edges = self.compute_voronoi_for_small_set(vertices); self.redraw_all_edges(); return
-
-        # 遞迴步驟: 分割
-        if self.first == False:
-            points = vertices
-            vertices_b = [Vertex(id=i, x=p[0], y=p[1]) for i, p in enumerate(points)]
-            for v in vertices_b: self.draw_point(v.x, v.y, "blue"); self.canvas.create_text(*self.logical_to_tk_coords(v.x, v.y), text=str(v.id), anchor="n", fill="black", font=("Arial", 9))
-            if len(vertices_b) <= 3: self.left_voronoi_edges = self.compute_voronoi_for_small_set(vertices_b); self.redraw_all_edges(); return
-            
-            x_sorted = sorted(vertices_b, key=lambda v: (v.x, v.y)); mid = len(x_sorted) // 2
-            self.left_half_points, self.right_half_points = x_sorted[:mid], x_sorted[mid:]
-            self.sorted_points = x_sorted
-            divider_x = (self.left_half_points[-1].x + self.right_half_points[0].x) / 2.0
-            self.draw_edge_on_canvas(Edge(-100, Vertex(-98, divider_x, 0), Vertex(-99, divider_x, 600)), "blue", 2, (5, 3), "divider")
-            self.left_hull = self.sort_vertices_by_angle(self.left_half_points); self.right_hull = self.sort_vertices_by_angle(self.right_half_points)
-            for i, v in enumerate(self.left_hull): self.canvas.create_text(*self.logical_to_tk_coords(v.x, v.y+5), text=f"L{i}", fill="green", font=("Arial", 10, "bold"))
-            for i, v in enumerate(self.right_hull): self.canvas.create_text(*self.logical_to_tk_coords(v.x, v.y+5), text=f"R{i}", fill="purple", font=("Arial", 10, "bold"))
-
-        sorted_vertices = sorted(vertices, key=lambda v: (v.x, v.y)); mid = len(vertices) // 2
-        mid = num_vertices // 2
-
-        self.left_half_points = sorted_vertices[:mid]
-        self.right_half_points = sorted_vertices[mid:]
-
-
-        # 遞迴呼叫
-        left_half_points = self.voronoi_recursive(self.left_half_points)
-        right_half_points = self.voronoi_recursive(self.right_half_points)
-        
-
-        # 合併
-        self.merge_phase = 'ready_to_merge'; print("已完成分割與排序，準備合併。") 
-        
     def draw_initial_bridge(self):
         print("\n--- 第 1 步：計算子問題並繪製初始橋樑 ---")
         self.canvas.delete("voronoi_edge", "bridge_line")
@@ -701,6 +660,7 @@ class PointDrawerApp:
             self.draw_point(p[0], p[1], "blue")
             tk_x, tk_y = self.logical_to_tk_coords(p[0], p[1])
             self.canvas.create_text(tk_x + 8, tk_y, text=str(i), anchor="w", fill="black", font=("Arial", 9))
+        print(f"\n已載入測試案例 {self.current_block_index + 1} / {len(self.test_data_blocks)}，共 {len(points)} 個點。")
 
     def load_next_test_data(self):
         """載入下一筆測試案例"""
