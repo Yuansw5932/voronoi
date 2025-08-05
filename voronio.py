@@ -1,6 +1,6 @@
 import tkinter as tk
 import math
-
+#Test
 class Vertex:
     """代表一個點（或稱頂點）的類別"""
     def __init__(self, id, x=0.0, y=0.0):
