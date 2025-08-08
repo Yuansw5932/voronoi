@@ -1,16 +1,10 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.spatial import Voronoi, voronoi_plot_2d
+from matplotlib.animation import FuncAnimation
 
-# 定義 4 個點（可改動）
-
-points = np.array([
-    [567 ,234],
-    [79 ,34],
-    [34 ,90],
-    [432 ,453],
-    [77 ,111]
-])
+# 您提供的點
+points = np.array([[568, 481], [328, 270], [284, 380], [587, 284], [36, 260], [161, 373]])
 
 # 建立 Voronoi 圖
 vor = Voronoi(points)

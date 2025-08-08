@@ -274,15 +274,18 @@ class PointDrawerApp:
         actions.get(self.merge_phase, lambda: None)()
 
     def voronoi_recursive(self, vertices):
-    
-        num_vertices = len(vertices)
         
-        if len(vertices) <= 3: self.left_voronoi_edges = self.compute_voronoi_for_small_set(vertices); self.redraw_all_edges(); return
-
+        if len(vertices) == 1:
+            return
         # 遞迴步驟: 分割
         if self.first == False:
+            print("hi")
+            print(vertices)
             points = vertices
-            vertices_b = [Vertex(id=i, x=p[0], y=p[1]) for i, p in enumerate(points)]
+            vertices_b = [
+                Vertex(id=i, x=p[0], y=p[1]) if not isinstance(p, Vertex) else p
+                for i, p in enumerate(points)
+            ]
             for v in vertices_b: self.draw_point(v.x, v.y, "blue"); self.canvas.create_text(*self.logical_to_tk_coords(v.x, v.y), text=str(v.id), anchor="n", fill="black", font=("Arial", 9))
             if len(vertices_b) <= 3: self.left_voronoi_edges = self.compute_voronoi_for_small_set(vertices_b); self.redraw_all_edges(); return
             
@@ -294,19 +297,14 @@ class PointDrawerApp:
             self.left_hull = self.sort_vertices_by_angle(self.left_half_points); self.right_hull = self.sort_vertices_by_angle(self.right_half_points)
             for i, v in enumerate(self.left_hull): self.canvas.create_text(*self.logical_to_tk_coords(v.x, v.y+5), text=f"L{i}", fill="green", font=("Arial", 10, "bold"))
             for i, v in enumerate(self.right_hull): self.canvas.create_text(*self.logical_to_tk_coords(v.x, v.y+5), text=f"R{i}", fill="purple", font=("Arial", 10, "bold"))
-
-        sorted_vertices = sorted(vertices, key=lambda v: (v.x, v.y)); mid = len(vertices) // 2
-        mid = num_vertices // 2
-
-        self.left_half_points = sorted_vertices[:mid]
-        self.right_half_points = sorted_vertices[mid:]
-
+        
+        self.first = False
 
         # 遞迴呼叫
         left_half_points = self.voronoi_recursive(self.left_half_points)
+        print("!!!!!!!!!!!!!!!!!!")
         right_half_points = self.voronoi_recursive(self.right_half_points)
         
-
         # 合併
         self.merge_phase = 'ready_to_merge'; print("已完成分割與排序，準備合併。") 
         
@@ -320,7 +318,7 @@ class PointDrawerApp:
         self.upper_tangent = self.find_common_tangent(self.left_hull, self.right_hull, True)
         self.lower_tangent = self.find_common_tangent(self.left_hull, self.right_hull, False)
         if not self.upper_tangent[0] or not self.upper_tangent[1]:
-            self.merge_phase = 'complete'; return
+            self.merge_phase = 'complete'; 
             
         self.current_bridge_l, self.current_bridge_r = self.upper_tangent
         print(f"上切線 (初始橋樑): {self.current_bridge_l} -> {self.current_bridge_r}")
@@ -340,7 +338,7 @@ class PointDrawerApp:
             self.merge_phase = 'complete'
             self.btn3.config(text="清理輔助線")
             self.redraw_all_edges()
-            return
+            
 
         dx = initial_bisector.end.x - initial_bisector.start.x
         dy = initial_bisector.end.y - initial_bisector.start.y
@@ -365,12 +363,13 @@ class PointDrawerApp:
         if self.current_bridge_l == self.lower_tangent[0] and self.current_bridge_r == self.lower_tangent[1]: #bug for last line cant be draw
              print("橋樑已抵達下公切線，合併完成！")
              for i, edge in enumerate(self.merging_chain_edges):
+                print("122222222222222222222222221111111111111")
                 is_predictive = (i == len(self.merging_chain_edges) - 1)
                 
                 color = "red" if is_predictive else "black"
                 dash = (5,3) if is_predictive and self.merge_phase != 'complete' else None
                 width = 2
-                self.draw_edge_on_canvas(edge, color, width, dash, "hi")
+                self.draw_edge_on_canvas(edge, color, width, dash, "hii")
                 
 
              last_ray = self.merging_chain_edges[-1]
@@ -383,7 +382,7 @@ class PointDrawerApp:
              self.merge_phase = 'complete'
              self.btn3.config(text="清理輔助線")
              self.redraw_all_edges()
-             return
+             
 
         last_known_intersection = self.merging_chain_edges[-1].start
         current_bisector = self.get_perpendicular_bisector(*self.current_bridge, -202)
@@ -395,7 +394,7 @@ class PointDrawerApp:
             self.merge_phase = 'complete'
             self.btn3.config(text="清理輔助線")
             self.redraw_all_edges()
-            return
+            
         
         self.merging_chain_edges[-1].end = next_intersect
 
@@ -530,7 +529,7 @@ class PointDrawerApp:
             self.merge_phase = 'cleaned_up'
             self.btn3.config(text="完成", state=tk.DISABLED)
             print("\n圖形為空或過於簡單，無需校驗。")
-            return
+            
 
         endpoint_coords = []
         coord_to_vertex = {} 
