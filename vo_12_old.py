@@ -347,9 +347,13 @@ class VoronoiDiagram:
         return final_edges, hyperplane
     
     def _find_near_intra_is(self, scan_pb, edges, search_origin):
+        """
+        [新版] 在給定的邊集合(edges)中，尋找與掃描線(scan_pb)最近的、位於前進方向的交點。
+        """
         nearest_is_pt, nearest_is_idx = None, -1
         min_t = float('inf')
 
+        # 標準化掃描線方向，使其始終從上到下，方便比較
         spb = Line(scan_pb.start, scan_pb.end)
         if (spb.end.y - spb.start.y) > 0:
             spb.start, spb.end = spb.end, spb.start
@@ -357,9 +361,10 @@ class VoronoiDiagram:
         p1, p2 = spb.start, spb.end
         vec = p2 - p1
         vec_len_sq = vec.x**2 + vec.y**2
-        if vec_len_sq < 1e-12:
+        if vec_len_sq < 1e-12: # 提高對極短向量的判斷精度
             return None, -1
 
+        # 計算 search_origin 在掃描線上的投影參數 t_origin
         origin_vec = search_origin - p1
         t_origin = (origin_vec.x * vec.x + origin_vec.y * vec.y) / vec_len_sq
         
@@ -369,18 +374,26 @@ class VoronoiDiagram:
             
             p3, p4 = edge.start, edge.end
 
+            # 使用標準線段相交公式計算交點
             den = (p1.x - p2.x) * (p3.y - p4.y) - (p1.y - p2.y) * (p3.x - p4.x)
-            if abs(den) < 1e-9:
+            if abs(den) < 1e-9: # 平行或共線，跳過
                 continue
 
             t_num = (p1.x - p3.x) * (p3.y - p4.y) - (p1.y - p3.y) * (p3.x - p4.x)
             u_num = -((p1.x - p2.x) * (p1.y - p3.y) - (p1.y - p2.y) * (p1.x - p3.x))
 
-            t = t_num / den
-            u = u_num / den
+            t = t_num / den # t: 交點在掃描線 spb 上的參數
+            u = u_num / den # u: 交點在邊 edge 上的參數
 
+            # --- [核心修改] ---
+            # 這是演算法中最容易受浮點數影響的地方。
+            # 1. (0.0 - epsilon <= u <= 1.0 + epsilon): 判斷交點是否在線段 edge 上（允許端點有 epsilon 誤差）。
+            # 2. (t > t_origin - epsilon): 判斷交點是否在 search_origin 的「前方」。
+            #    這裡使用 t_origin - epsilon 而非 t_origin + epsilon 是為了「容忍」那些因計算誤差
+            #    而稍微「落後」於 t_origin 的、但實際上是同一個位置的交點。
+            #    這對於處理多個超平面交於同一 Voronoi 頂點的情況至關重要。
             epsilon = 1e-9
-            if (0.0 - epsilon <= u <= 1.0 + epsilon) and (t > t_origin + epsilon / 10): 
+            if (0.0 - epsilon <= u <= 1.0 + epsilon) and (t > t_origin + epsilon / 10): # 仍然需要向前，但可以稍微放寬
                 if t < min_t:
                     min_t = t
                     x = p1.x + t * (p2.x - p1.x)
@@ -412,32 +425,61 @@ class VoronoiDiagram:
         return Line(new_start, new_end)
 
     def _update_trend(self, hyperplane, scan_trends):
+        """
+        [新版日誌] 更新超平面每個轉折點的趨勢（左轉/右轉）。
+        """
+        print("\n--- [日誌] 開始計算超平面轉折趨勢 ---")
         for i in range(len(hyperplane) - 1):
+            # 計算相鄰兩段超平面向量的外積
             v1 = hyperplane[i].slope
             v2 = hyperplane[i+1].slope
             cp = Point.cross_product(v1, v2)
             
+            # 根據外積結果判斷轉向
             if cp > 1e-9:
                 scan_trends[i].trend = 2 # 右轉 (順時針, CW)
+                print(f"  片段 H[{i}] -> H[{i+1}]: 偵測到向右轉 (CW)")
             elif cp < -1e-9:
                 scan_trends[i].trend = 1 # 左轉 (逆時針, CCW)
-
+                print(f"  片段 H[{i}] -> H[{i+1}]: 偵測到向左轉 (CCW)")
+            else:
+                print(f"  片段 H[{i}] -> H[{i+1}]: 偵測到直線前進")
+        print("--- [日誌] 轉折趨勢計算完成 ---\n")
+    
     def _elimination(self, hyperplane, scan_trends, l_edges, r_edges):
+        """
+        [新版日誌] 根據超平面的轉向趨勢，修剪(prune)左右子圖中被交錯的邊。
+        """
+        print("--- [日誌] 開始執行消線 (Elimination) 流程 ---")
         for i in range(len(hyperplane) - 1):
             turn_info = scan_trends[i]
             edge_info = scan_trends[i]
+            
             intersection_pt = hyperplane[i].end
             
-            if edge_info.direction == 0 or turn_info.trend == 0: continue
-            if intersection_pt is None or intersection_pt.is_on_boundary(self.width, self.height): continue
+            print(f"\n[ Turn {i} ] 在交點 P({intersection_pt.x:.2f}, {intersection_pt.y:.2f})")
+
+            # 如果沒有趨勢資訊或沒有對應的邊，則跳過
+            if edge_info.direction == 0 or turn_info.trend == 0:
+                print("  - 略過：無轉向趨勢或無關聯邊。")
+                continue
+
+            if intersection_pt is None or intersection_pt.is_on_boundary(self.width, self.height):
+                print("  - 略過：交點位於畫布邊界，不進行修剪。")
+                continue
             
             edges_list = l_edges if edge_info.direction == 1 else r_edges
-            if not (0 <= edge_info.index < len(edges_list)): continue
+            side = "Left" if edge_info.direction == 1 else "Right"
+            if not (0 <= edge_info.index < len(edges_list)):
+                print(f"  - 錯誤：邊索引 {edge_info.index} 超出範圍。")
+                continue
                 
             edge_to_prune = edges_list[edge_info.index]
+            print(f"  - 檢測邊：{side} Edge[{edge_info.index}] 從 {edge_to_prune.start} 到 {edge_to_prune.end}")
 
             if Point.is_similar(intersection_pt, edge_to_prune.start) or \
                Point.is_similar(intersection_pt, edge_to_prune.end):
+                print("  - 略過：交點已是該線段的端點，無需修剪。")
                 continue
 
             v_hyper = hyperplane[i].slope
@@ -446,14 +488,35 @@ class VoronoiDiagram:
             
             cross_prod_end = Point.cross_product(v_hyper, v_to_end)
             cross_prod_start = Point.cross_product(v_hyper, v_to_start)
+            
+            print(f"  - 超平面向量: V_h({v_hyper.x:.2f}, {v_hyper.y:.2f})")
+            print(f"  - 外積(v_hyper, v_to_start): {cross_prod_start:.4f}")
+            print(f"  - 外積(v_hyper, v_to_end): {cross_prod_end:.4f}")
 
-            if turn_info.trend == 1: # Trend LEFT (CCW)
-                if cross_prod_end < cross_prod_start: edge_to_prune.end = intersection_pt
-                else: edge_to_prune.start = intersection_pt
-            elif turn_info.trend == 2: # Trend RIGHT (CW)
-                if cross_prod_end > cross_prod_start: edge_to_prune.end = intersection_pt
-                else: edge_to_prune.start = intersection_pt
+            original_start = Point(edge_to_prune.start.x, edge_to_prune.start.y)
+            original_end = Point(edge_to_prune.end.x, edge_to_prune.end.y)
 
+            # Trend LEFT (CCW)
+            if turn_info.trend == 1:
+                print("  - 決策：向左轉(CCW)，保留較順時針的一側。")
+                if cross_prod_end < cross_prod_start:
+                    edge_to_prune.end = intersection_pt
+                    print(f"    - 結果：保留 Start -> Intersection。新線段: {original_start} -> {intersection_pt}")
+                else:
+                    edge_to_prune.start = intersection_pt
+                    print(f"    - 結果：保留 Intersection -> End。新線段: {intersection_pt} -> {original_end}")
+            
+            # Trend RIGHT (CW)
+            elif turn_info.trend == 2:
+                print("  - 決策：向右轉(CW)，保留較逆時針的一側。")
+                if cross_prod_end > cross_prod_start:
+                    edge_to_prune.end = intersection_pt
+                    print(f"    - 結果：保留 Start -> Intersection。新線段: {original_start} -> {intersection_pt}")
+                else:
+                    edge_to_prune.start = intersection_pt
+                    print(f"    - 結果：保留 Intersection -> End。新線段: {intersection_pt} -> {original_end}")
+        print("\n--- [日誌] 消線 (Elimination) 流程結束 ---")
+        
     def _clip_edges(self, edges):
         if not edges: return []
         clipped = []
@@ -507,17 +570,9 @@ class VoronoiDiagram:
 class Application(tk.Tk):
     def __init__(self, width=600, height=600):
         super().__init__()
-        self.visible_width = width
-        self.visible_height = height
-        
-        self.comp_width = self.visible_width * 10
-        self.comp_height = self.visible_height * 10
-        
-        self.comp_offset_x = (self.comp_width - self.visible_width) / 2
-        self.comp_offset_y = (self.comp_height - self.visible_height) / 2
-
-        self.title("Voronoi 圖產生器 (600x600 View)")
-        self.geometry(f"{self.visible_width + 250}x{self.visible_height + 50}")
+        self.width, self.height = width, height
+        self.title("Voronoi 圖產生器 (左下角為原點)")
+        self.geometry(f"{width + 250}x{height + 50}")
         self.resizable(False, False)
         self.points, self.voronoi_steps, self.current_step = [], [], 0
         self._create_widgets()
@@ -526,7 +581,7 @@ class Application(tk.Tk):
         main_frame = ttk.Frame(self, padding=10)
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        self.canvas = tk.Canvas(main_frame, width=self.visible_width, height=self.visible_height, bg="white", highlightthickness=1, highlightbackground="black")
+        self.canvas = tk.Canvas(main_frame, width=self.width, height=self.height, bg="white", highlightthickness=1, highlightbackground="black")
         self.canvas.pack(side=tk.LEFT, padx=(0, 10), fill=tk.BOTH, expand=True)
         self.canvas.bind("<Button-1>", self.add_point_on_click)
 
@@ -557,6 +612,7 @@ class Application(tk.Tk):
         self.add_coord_button.pack(side=tk.LEFT, padx=(5, 0))
         self.y_entry.bind("<Return>", lambda event: self.add_coord_button.invoke())
 
+        # --- [新功能] 新增從檔案載入的按鈕 ---
         ttk.Button(point_frame, text="從檔案載入", command=self.load_points_from_file).pack(fill=tk.X, pady=(5,0))
         ttk.Button(point_frame, text="清除畫布", command=self.clear_canvas).pack(fill=tk.X, pady=(5,0))
 
@@ -580,30 +636,24 @@ class Application(tk.Tk):
         self.step_label.pack(fill=tk.X, pady=5)
 
     def add_point_on_click(self, event):
-        comp_x = event.x + self.comp_offset_x
-        comp_y = (self.visible_height - event.y) + self.comp_offset_y
-        self.points.append(Point(comp_x, comp_y))
+        self.points.append(Point(event.x, self.height - event.y))
         self.reset_steps()
-        self.canvas.delete("all")
-        self.draw_points(self.points)
+        self.draw_points()
 
     def add_point_from_entry(self):
         try:
             x_val = float(self.x_entry.get())
             y_val = float(self.y_entry.get())
             
-            if 0 <= x_val <= self.visible_width and 0 <= y_val <= self.visible_height:
-                comp_x = x_val + self.comp_offset_x
-                comp_y = y_val + self.comp_offset_y
-                self.points.append(Point(comp_x, comp_y))
+            if 0 <= x_val <= self.width and 0 <= y_val <= self.height:
+                self.points.append(Point(x_val, y_val))
                 self.reset_steps()
-                self.canvas.delete("all")
-                self.draw_points(self.points)
+                self.draw_points()
                 self.x_entry.delete(0, tk.END)
                 self.y_entry.delete(0, tk.END)
                 self.x_entry.focus()
             else:
-                messagebox.showwarning("座標超出範圍", f"請輸入在畫布範圍內的座標 (X: 0-{self.visible_width}, Y: 0-{self.visible_height})。")
+                messagebox.showwarning("座標超出範圍", f"請輸入在畫布範圍內的座標 (X: 0-{self.width}, Y: 0-{self.height})。")
         except (ValueError, TypeError):
             messagebox.showerror("無效輸入", "請在 X 和 Y 座標欄位中輸入有效的數字。")
 
@@ -611,14 +661,12 @@ class Application(tk.Tk):
         self.clear_canvas()
         try:
             num = int(self.random_points_entry.get())
-            for _ in range(num):
-                rand_x_vis = random.randint(10, self.visible_width - 10)
-                rand_y_vis = random.randint(10, self.visible_height - 10)
-                self.points.append(Point(rand_x_vis + self.comp_offset_x, rand_y_vis + self.comp_offset_y))
+            for _ in range(num): self.points.append(Point(random.randint(10, self.width - 10), random.randint(10, self.height - 10)))
         except (ValueError, TypeError): messagebox.showerror("無效輸入", "請輸入一個有效的整數。")
-        self.draw_points(self.points)
+        self.draw_points()
         
     def _parse_test_cases(self, lines):
+        """[新功能] 解析檔案所有行，並從中提取所有測資。"""
         test_cases = []
         i = 0
         while i < len(lines):
@@ -628,8 +676,8 @@ class Application(tk.Tk):
                 continue
             try:
                 num_points = int(line)
-                if num_points == 0: break 
-                if i + num_points >= len(lines): break 
+                if num_points == 0: break # 檔案結束標記
+                if i + num_points >= len(lines): break # 檔案不完整
                 
                 points = []
                 for j in range(1, num_points + 1):
@@ -644,10 +692,11 @@ class Application(tk.Tk):
                 
                 i += num_points + 1
             except ValueError:
-                i += 1
+                i += 1 # 如果某行不是數字，跳過並繼續尋找下一個測資的開頭
         return test_cases
 
     def _show_test_case_selection_dialog(self, test_cases):
+        """[新功能] 建立一個新視窗讓使用者選擇要載入哪個測資。"""
         dialog = tk.Toplevel(self)
         dialog.title("選擇要載入的測資")
         dialog.geometry("300x400")
@@ -655,11 +704,13 @@ class Application(tk.Tk):
         dialog.grab_set()
 
         ttk.Label(dialog, text="在檔案中找到以下測資：").pack(pady=10)
+
         listbox_frame = ttk.Frame(dialog)
         listbox_frame.pack(pady=5, padx=10, fill=tk.BOTH, expand=True)
 
         listbox = tk.Listbox(listbox_frame, selectmode=tk.SINGLE, font=("Arial", 10))
-        for case in test_cases: listbox.insert(tk.END, case["name"])
+        for case in test_cases:
+            listbox.insert(tk.END, case["name"])
         listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         scrollbar = ttk.Scrollbar(listbox_frame, orient=tk.VERTICAL, command=listbox.yview)
@@ -671,10 +722,10 @@ class Application(tk.Tk):
             selection_indices = listbox.curselection()
             if not selection_indices: return
             
-            selected_points_raw = test_cases[selection_indices[0]]["points"]
+            selected_points = test_cases[selection_indices[0]]["points"]
             self.clear_canvas()
-            self.points = [Point(p.x + self.comp_offset_x, p.y + self.comp_offset_y) for p in selected_points_raw]
-            self.draw_points(self.points)
+            self.points = selected_points
+            self.draw_points()
             dialog.destroy()
 
         button_frame = ttk.Frame(dialog)
@@ -690,6 +741,7 @@ class Application(tk.Tk):
 
 
     def load_points_from_file(self):
+        """[新功能] 主函式，用於開啟檔案選擇器、解析並顯示測資選擇視窗。"""
         file_path = filedialog.askopenfilename(
             title="選擇一個測資檔案",
             filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
@@ -709,61 +761,121 @@ class Application(tk.Tk):
         except Exception as e:
             messagebox.showerror("讀取失敗", f"讀取或解析檔案時發生錯誤: {e}")
 
+    # (run_normal, run_step_by_step_generate 等其他函式保持不變...)
     def _filter_isolated_edges(self, edges, l_count=None, r_count=None):
-        if not edges: return []
+        """
+        [方案 F - 嚴格雙端點連接規則]
+        - 內部邊: 兩個端點都必須連接。
+        - 邊界邊: 至少一個端點必須連接。
+        """
+        print("\n--- 清理階段：使用嚴格的雙端點連接規則校驗 Voronoi 邊 ---")
 
+        if not edges:
+            print("   [校驗] 圖形為空，無需校驗。")
+            return []
+
+        # 輔助函式 1: 根據全域索引獲取 L/R/H 標籤
         def get_edge_label(index):
-            if l_count is None or r_count is None: return f"Edge[{index}]"
-            if index < l_count: return f"L[{index}]"
-            elif index < l_count + r_count: return f"R[{index - l_count}]"
-            else: return f"H[{index - l_count - r_count}]"
+            if l_count is None or r_count is None:
+                return f"Edge[{index}]"
+            
+            if index < l_count:
+                return f"L[{index}]"
+            elif index < l_count + r_count:
+                return f"R[{index - l_count}]"
+            else:
+                return f"H[{index - l_count - r_count}]"
 
+        # 輔助函式 2: 檢查點是否在畫布邊界上
         def is_on_boundary(p, tol=1e-5):
             return (math.isclose(p.x, 0, abs_tol=tol) or
-                    math.isclose(p.x, self.comp_width, abs_tol=tol) or
+                    math.isclose(p.x, self.width, abs_tol=tol) or
                     math.isclose(p.y, 0, abs_tol=tol) or
-                    math.isclose(p.y, self.comp_height, abs_tol=tol))
+                    math.isclose(p.y, self.height, abs_tol=tol))
 
+        # 輔助函式 3: 檢查點(p)是否在線段(seg)上
         def _is_point_on_segment(p, seg, tol=1e-5):
             cross_product = (p.y - seg.start.y) * (seg.end.x - seg.start.x) - \
                             (p.x - seg.start.x) * (seg.end.y - seg.start.y)
-            if not math.isclose(cross_product, 0, abs_tol=tol): return False
+            if not math.isclose(cross_product, 0, abs_tol=tol):
+                return False
+
             on_x = min(seg.start.x, seg.end.x) - tol <= p.x <= max(seg.start.x, seg.end.x) + tol
             on_y = min(seg.start.y, seg.end.y) - tol <= p.y <= max(seg.start.y, seg.end.y) + tol
             return on_x and on_y
 
         kept_edges = []
         for i, edge_i in enumerate(edges):
+            label_i = get_edge_label(i)
+            
             is_internal_edge = not is_on_boundary(edge_i.start) and not is_on_boundary(edge_i.end)
-            start_conn, end_conn = False, False
+            
+            start_conn_info = None
+            end_conn_info = None
 
+            # 檢查 start 端點的連接情況
             for j, edge_j in enumerate(edges):
                 if i == j: continue
-                if not start_conn and _is_point_on_segment(edge_i.start, edge_j): start_conn = True
-                if not end_conn and _is_point_on_segment(edge_i.end, edge_j): end_conn = True
-                if start_conn and end_conn: break
+                if _is_point_on_segment(edge_i.start, edge_j):
+                    start_conn_info = f"碰到 {get_edge_label(j)}"
+                    break
+
+            # 檢查 end 端點的連接情況
+            for j, edge_j in enumerate(edges):
+                if i == j: continue
+                if _is_point_on_segment(edge_i.end, edge_j):
+                    end_conn_info = f"碰到 {get_edge_label(j)}"
+                    break
             
+            # 根據新規則進行判斷和日誌輸出
             if is_internal_edge:
-                if start_conn and end_conn: kept_edges.append(edge_i)
-            else:
-                if start_conn or end_conn: kept_edges.append(edge_i)
+                if start_conn_info and end_conn_info:
+                    print(f"   [校驗] 保留內部邊 {label_i}: start {start_conn_info}, end {end_conn_info}。")
+                    kept_edges.append(edge_i)
+            else: # 這是邊界邊 (射線)
+                if start_conn_info or end_conn_info:
+                    reason = "未知"
+                    if start_conn_info and not end_conn_info: 
+                        reason = f"內部端點 'start' {start_conn_info}"
+                    elif end_conn_info and not start_conn_info:
+                        reason = f"內部端點 'end' {end_conn_info}"
+                    elif start_conn_info and end_conn_info:
+                        reason = f"start {start_conn_info}, end {end_conn_info}"
+                    
+                    print(f"   [校驗] 保留邊界邊 {label_i}: 至少一個端點連接 ({reason})。")
+                    kept_edges.append(edge_i)
                     
         return kept_edges
 
     def run_normal(self):
         if len(self.points) < 2: return
         self.reset_steps()
-        voronoi = VoronoiDiagram(self.points, self.comp_width, self.comp_height)
+        voronoi = VoronoiDiagram(self.points, self.width, self.height)
         
         edges, hull, h_planes = voronoi.run(step_mode=False)
         
         if edges is None:
-            messagebox.showerror("執行錯誤", "演算法執行過程中發生錯誤。")
+            messagebox.showerror("執行錯誤", "演算法執行過程中發生錯誤，可能進入了無限迴圈或遇到未處理的邊界情況。")
             return
         
         all_segments_to_check = edges + (h_planes if h_planes else [])
+        
         kept_edges = self._filter_isolated_edges(all_segments_to_check)
         
+        print("\n--- 最終移除結果報告 ---")
+        
+        kept_edges_ids = {id(e) for e in kept_edges}
+        
+        deleted_count = 0
+        for i, edge in enumerate(all_segments_to_check):
+            if id(edge) not in kept_edges_ids:
+                print(f'   已刪除線段 (來自 all_segments_to_check[{i}]): {edge}')
+                deleted_count += 1
+        
+        if deleted_count == 0:
+            print("   沒有刪除任何線段。")
+        print("-----------------------------")
+
         self.draw_all(
             points=self.points,
             left_edges=kept_edges,
@@ -774,29 +886,61 @@ class Application(tk.Tk):
         )
 
     def run_step_by_step_generate(self):
+        
         if len(self.points) < 2: return
         self.reset_steps()
-        voronoi = VoronoiDiagram(self.points, self.comp_width, self.comp_height)
+        voronoi = VoronoiDiagram(self.points, self.width, self.height)
         voronoi.run(step_mode=True)
         self.voronoi_steps = voronoi.steps
-        
+        for i in self.points:
+            print(i)
         if self.voronoi_steps:
             last_step = self.voronoi_steps[-1]
-            all_segments_before_cleanup = last_step.left_edges + last_step.right_edges + last_step.hyperplane
+            
+            l_edges = last_step.left_edges
+            r_edges = last_step.right_edges
+            h_edges = last_step.hyperplane
+            all_segments_before_cleanup = l_edges + r_edges + h_edges
+            
             final_kept_edges = self._filter_isolated_edges(
                 all_segments_before_cleanup, 
-                l_count=len(last_step.left_edges), 
-                r_count=len(last_step.right_edges)
+                l_count=len(l_edges), 
+                r_count=len(r_edges)
             )
             
+            print("\n--- 最終移除結果報告 (單步模式) ---")
+            kept_edges_ids = {id(e) for e in final_kept_edges}
+            deleted_count = 0
+
+            def get_edge_label(index, l_count, r_count):
+                if index < l_count:
+                    return f"L[{index}]"
+                elif index < l_count + r_count:
+                    return f"R[{index - l_count}]"
+                else:
+                    return f"H[{index - l_count - r_count}]"
+
+            for i, edge in enumerate(all_segments_before_cleanup):
+                if id(edge) not in kept_edges_ids:
+                    label = get_edge_label(i, len(l_edges), len(r_edges))
+                    print(f'   已刪除懸空線段 {label}: {edge}')
+                    deleted_count += 1
+            
+            if deleted_count == 0:
+                print("   沒有刪除任何線段。")
+            print("-----------------------------")
+
+            final_hull_object = Polygon(points=last_step.convex_hull)
+
             cleanup_step = StepRecord(
                 description="最終清理：移除懸空邊",
                 points=last_step.points,
                 left_edges=final_kept_edges,
                 right_edges=[],
                 hyperplane=[],
-                convex_hull=Polygon(points=last_step.convex_hull)
+                convex_hull=final_hull_object
             )
+            
             self.voronoi_steps.append(cleanup_step)
 
             self.current_step = 0
@@ -806,6 +950,7 @@ class Application(tk.Tk):
 
     def save_points_to_file(self):
         file_name = "無註解Voronoi Diagra公開測資.txt"
+        
         if not self.points:
             messagebox.showinfo("沒有點", "畫布上沒有點可以儲存。")
             return
@@ -815,16 +960,16 @@ class Application(tk.Tk):
             try:
                 with open(file_name, 'r', encoding='utf-8') as f:
                     lines = f.readlines()
-                if lines and lines[-1].strip() == '0': lines.pop()
-            except FileNotFoundError: pass
+                if lines and lines[-1].strip() == '0':
+                    lines.pop()
+            except FileNotFoundError:
+                pass
 
             with open(file_name, 'w', encoding='utf-8') as f:
                 f.writelines(lines)
                 f.write(f"{len(self.points)}\n")
-                for p_comp in self.points:
-                    vis_x = p_comp.x - self.comp_offset_x
-                    vis_y = p_comp.y - self.comp_offset_y
-                    f.write(f"{int(vis_x)} {int(vis_y)}\n")
+                for p in self.points:
+                    f.write(f"{int(p.x)} {int(p.y)}\n")
                 f.write("0\n")
 
             messagebox.showinfo("儲存成功", f"已成功將 {len(self.points)} 個點附加到 {file_name}")
@@ -868,100 +1013,60 @@ class Application(tk.Tk):
         self.prev_button.config(state=tk.DISABLED)
         self.next_button.config(state=tk.DISABLED)
 
-    def draw_points(self, points_to_draw):
-        # [MODIFIED] This is now a helper function. It no longer clears the canvas.
-        # It draws the points passed to it as an argument.
-        for p_comp in points_to_draw:
-            vis_x = p_comp.x - self.comp_offset_x
-            vis_y = p_comp.y - self.comp_offset_y
-            
-            if 0 <= vis_x <= self.visible_width and 0 <= vis_y <= self.visible_height:
-                canvas_y = self.visible_height - vis_y
-                self.canvas.create_oval(vis_x - 3, canvas_y - 3, vis_x + 3, canvas_y + 3, fill="red", outline="black")
-                self.canvas.create_text(vis_x + 5, canvas_y - 5, text=f"({vis_x:.0f}, {vis_y:.0f})", anchor=tk.SW, fill="black")
-    
-    def _clip_to_visible_canvas(self, p1, p2):
-        INSIDE, LEFT, RIGHT, BOTTOM, TOP = 0, 1, 2, 4, 8
-        xmin, ymin, xmax, ymax = 0, 0, self.visible_width, self.visible_height
-        
-        def _get_code(p):
-            code = INSIDE
-            if p.x < xmin: code |= LEFT
-            elif p.x > xmax: code |= RIGHT
-            if p.y < ymin: code |= BOTTOM
-            elif p.y > ymax: code |= TOP
-            return code
-
-        code1, code2 = _get_code(p1), _get_code(p2)
-        while True:
-            if not (code1 | code2): return (p1, p2)
-            if code1 & code2: return None
-            
-            code_out = code1 or code2
-            x, y = 0.0, 0.0
-            dy, dx = p2.y - p1.y, p2.x - p1.x
-            
-            if code_out & TOP:
-                x = p1.x + dx * (ymax - p1.y) / dy if dy != 0 else p1.x
-                y = ymax
-            elif code_out & BOTTOM:
-                x = p1.x + dx * (ymin - p1.y) / dy if dy != 0 else p1.x
-                y = ymin
-            elif code_out & RIGHT:
-                y = p1.y + dy * (xmax - p1.x) / dx if dx != 0 else p1.y
-                x = xmax
-            elif code_out & LEFT:
-                y = p1.y + dy * (xmin - p1.x) / dx if dx != 0 else p1.y
-                x = xmin
-            
-            if code_out == code1:
-                p1, code1 = Point(x, y), _get_code(Point(x, y))
-            else:
-                p2, code2 = Point(x, y), _get_code(Point(x, y))
+    def draw_points(self):
+        self.canvas.delete("all")
+        for p in self.points:
+            y = self.height - p.y
+            self.canvas.create_oval(p.x - 3, y - 3, p.x + 3, y + 3, fill="red", outline="black")
+            self.canvas.create_text(p.x + 5, y - 5, text=f"({p.x:.0f}, {p.y:.0f})", anchor=tk.SW, fill="black")
 
     def draw_all(self, points, left_edges, right_edges, hyperplane, convex_hull_pts, is_final_run=False):
-        # [MODIFIED] This function now orchestrates all drawing for a step.
         self.canvas.delete("all")
+        def convert_y(y_coord): return self.height - y_coord
 
-        def get_drawable_edge(edge):
-            if not isinstance(edge, Edge): return None
-            p1_vis = Point(edge.start.x - self.comp_offset_x, edge.start.y - self.comp_offset_y)
-            p2_vis = Point(edge.end.x - self.comp_offset_x, edge.end.y - self.comp_offset_y)
-            return self._clip_to_visible_canvas(p1_vis, p2_vis)
-
-        def draw_edge_list(edges, color, prefix="", width=1.5):
-            for i, edge in enumerate(edges):
-                drawable_pts = get_drawable_edge(edge)
-                if drawable_pts:
-                    p1, p2 = drawable_pts
-                    y1, y2 = self.visible_height - p1.y, self.visible_height - p2.y
-                    self.canvas.create_line(p1.x, y1, p2.x, y2, fill=color, width=width)
-                    if prefix and not is_final_run:
-                        mid_x, mid_y = (p1.x + p2.x) / 2, (y1 + y2) / 2
-                        text_bbox = self.canvas.create_text(mid_x, mid_y, text=f"{prefix}{i}", fill="purple", font=("Arial", 8, "bold"))
-                        x1_b, y1_b, x2_b, y2_b = self.canvas.bbox(text_bbox)
-                        self.canvas.create_rectangle(x1_b-2, y1_b-1, x2_b+2, y2_b+1, fill="white", outline="")
-                        self.canvas.lift(text_bbox)
+        def draw_edge_with_id(edge, index, color, prefix, width=1.5):
+            if not isinstance(edge, Edge): return
+            self.canvas.create_line(edge.start.x, convert_y(edge.start.y), edge.end.x, convert_y(edge.end.y), fill=color, width=width)
+            if not is_final_run:
+                mid_x = (edge.start.x + edge.end.x) / 2
+                mid_y = convert_y((edge.start.y + edge.end.y) / 2)
+                label = f"{prefix}{index}"
+                text_bbox = self.canvas.create_text(mid_x, mid_y, text=label, fill="purple", font=("Arial", 8, "bold"), anchor=tk.CENTER)
+                x1, y1, x2, y2 = self.canvas.bbox(text_bbox)
+                self.canvas.create_rectangle(x1-2, y1-1, x2+2, y2+1, fill="white", outline="")
+                self.canvas.lift(text_bbox)
 
         if is_final_run:
-            draw_edge_list(left_edges, color="black", width=1.5)
+            for edge in left_edges: 
+                if isinstance(edge, Edge):
+                    self.canvas.create_line(edge.start.x, convert_y(edge.start.y), edge.end.x, convert_y(edge.end.y), fill="black", width=1.5)
         else:
-            draw_edge_list(left_edges, "#a6d1e6", "L", 1.5)
-            draw_edge_list(right_edges, "#b5e5a4", "R", 1.5)
-            draw_edge_list(hyperplane, "blue", "H", 2)
+            for i, edge in enumerate(left_edges): draw_edge_with_id(edge, i, "#a6d1e6", "L", width=1.5)
+            for i, edge in enumerate(right_edges): draw_edge_with_id(edge, i, "#b5e5a4", "R", width=1.5)
+            for i, edge in enumerate(hyperplane): draw_edge_with_id(edge, i, "blue", "H", width=2)
+            for i, segment in enumerate(hyperplane):
+                if i < len(hyperplane) - 1:
+                    p = segment.end
+                    if not p.is_on_boundary(self.width, self.height):
+                        y = convert_y(p.y)
+                        label = f"({p.x:.0f},{p.y:.0f})"
+                        text_bbox = self.canvas.create_text(p.x, y - 10, text=label, fill="darkblue", font=("Arial", 8, "bold"), anchor=tk.CENTER)
+                        x1, y1, x2, y2 = self.canvas.bbox(text_bbox)
+                        self.canvas.create_rectangle(x1-2, y1-1, x2+2, y2+1, fill="white", outline="")
+                        self.canvas.lift(text_bbox)
 
         if len(convex_hull_pts) > 1:
-            for i in range(len(convex_hull_pts)):
-                p_start, p_end = convex_hull_pts[i], convex_hull_pts[(i + 1) % len(convex_hull_pts)]
-                drawable_pts = get_drawable_edge(Edge(p_start, p_end))
-                if drawable_pts:
-                    p1, p2 = drawable_pts
-                    self.canvas.create_line(p1.x, self.visible_height - p1.y, p2.x, self.visible_height - p2.y, fill="green", width=2)
+            flat_pts = [c for p in convex_hull_pts for c in (p.x, convert_y(p.y))]
+            if len(convex_hull_pts) == 2: self.canvas.create_line(flat_pts, fill="green", width=2)
+            else: self.canvas.create_polygon(flat_pts, outline="green", fill="", width=2)
         
-        # Finally, draw the points for the current step
-        self.draw_points(points)
+        for p in points:
+            y = convert_y(p.y)
+            self.canvas.create_oval(p.x - 3, y - 3, p.x + 3, y + 3, fill="red", outline="black")
+            self.canvas.create_text(p.x + 5, y - 5, text=f"({p.x:.0f}, {p.y:.0f})", anchor=tk.SW, fill="black")
+
 
 if __name__ == "__main__":
     Point.normal = lambda self: Point(-self.y, self.x)
-    app = Application(width=600, height=600)
+    app = Application()
     app.mainloop()

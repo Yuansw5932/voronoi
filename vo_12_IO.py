@@ -423,36 +423,101 @@ class VoronoiDiagram:
                 scan_trends[i].trend = 1 # 左轉 (逆時針, CCW)
 
     def _elimination(self, hyperplane, scan_trends, l_edges, r_edges):
+        """
+        [FINAL VERSION] 根據使用者回饋修正。
+        
+        修正核心：
+        1. 移除了會錯誤忽略“端點交點”的判斷。現在，即使交點恰好是
+           一條舊Voronoi邊的端點，也會被正確記錄下來。
+        2. 確保了只要有一或多個交點，就能進入對應的裁切邏輯。
+        """
+        pruning_map = {}
+
+        # 1. 收集階段: 找出所有邊的交點並記錄
         for i in range(len(hyperplane) - 1):
-            turn_info = scan_trends[i]
             edge_info = scan_trends[i]
             intersection_pt = hyperplane[i].end
-            
-            if edge_info.direction == 0 or turn_info.trend == 0: continue
-            if intersection_pt is None or intersection_pt.is_on_boundary(self.width, self.height): continue
-            
-            edges_list = l_edges if edge_info.direction == 1 else r_edges
-            if not (0 <= edge_info.index < len(edges_list)): continue
-                
-            edge_to_prune = edges_list[edge_info.index]
 
-            if Point.is_similar(intersection_pt, edge_to_prune.start) or \
-               Point.is_similar(intersection_pt, edge_to_prune.end):
+            if edge_info.direction == 0 or intersection_pt is None:
                 continue
 
-            v_hyper = hyperplane[i].slope
-            v_to_end = edge_to_prune.end - intersection_pt
-            v_to_start = edge_to_prune.start - intersection_pt
+            edges_list = l_edges if edge_info.direction == 1 else r_edges
+            if not (0 <= edge_info.index < len(edges_list)):
+                continue
             
-            cross_prod_end = Point.cross_product(v_hyper, v_to_end)
-            cross_prod_start = Point.cross_product(v_hyper, v_to_start)
+            edge_to_prune = edges_list[edge_info.index]
 
-            if turn_info.trend == 1: # Trend LEFT (CCW)
-                if cross_prod_end < cross_prod_start: edge_to_prune.end = intersection_pt
-                else: edge_to_prune.start = intersection_pt
-            elif turn_info.trend == 2: # Trend RIGHT (CW)
-                if cross_prod_end > cross_prod_start: edge_to_prune.end = intersection_pt
-                else: edge_to_prune.start = intersection_pt
+            # [CRITICAL FIX] 移除此判斷。一個發生在端點上的交點，
+            # 依然是必須處理的合法交點，不應被跳過。
+            # if Point.is_similar(intersection_pt, edge_to_prune.start) or \
+            #    Point.is_similar(intersection_pt, edge_to_prune.end):
+            #    continue
+
+            key = (edge_info.direction, edge_info.index)
+            if key not in pruning_map:
+                pruning_map[key] = []
+            
+            is_duplicate = False
+            for existing_pt in pruning_map[key]:
+                if Point.is_similar(existing_pt, intersection_pt):
+                    is_duplicate = True
+                    break
+            
+            if not is_duplicate:
+                pruning_map[key].append(intersection_pt)
+
+        # 2. 應用階段: 根據交點數量執行裁切
+        for key, intersections in pruning_map.items():
+            direction, index = key
+            edges_list = l_edges if direction == 1 else r_edges
+            edge_to_prune = edges_list[index]
+
+            if len(intersections) == 1:
+                # --- 情況A: 單一交點，進行單邊裁切 ---
+                intersection_pt = intersections[0]
+                
+                original_turn = None
+                v_hyper = None
+                for i in range(len(hyperplane) - 1):
+                    if scan_trends[i].direction == direction and \
+                       scan_trends[i].index == index and \
+                       Point.is_similar(hyperplane[i].end, intersection_pt):
+                        original_turn = scan_trends[i]
+                        v_hyper = hyperplane[i].slope
+                        break
+                
+                if original_turn is None or v_hyper is None or original_turn.trend == 0:
+                    continue
+
+                v_to_end = edge_to_prune.end - intersection_pt
+                v_to_start = edge_to_prune.start - intersection_pt
+                cross_prod_end = Point.cross_product(v_hyper, v_to_end)
+                cross_prod_start = Point.cross_product(v_hyper, v_to_start)
+
+                if original_turn.trend == 1:  # 左轉 (CCW)
+                    if cross_prod_end < cross_prod_start: edge_to_prune.end = intersection_pt
+                    else: edge_to_prune.start = intersection_pt
+                elif original_turn.trend == 2:  # 右轉 (CW)
+                    if cross_prod_end > cross_prod_start: edge_to_prune.end = intersection_pt
+                    else: edge_to_prune.start = intersection_pt
+
+            elif len(intersections) >= 2:
+                # --- 情況B: 兩個(或以上)交點，直接用這兩個交點作為新的端點 ---
+                p1, p2 = None, None
+                if len(intersections) == 2:
+                    p1, p2 = intersections[0], intersections[1]
+                else: # Fallback for > 2 points, find the two farthest apart
+                    max_dist_sq = -1
+                    for i in range(len(intersections)):
+                        for j in range(i + 1, len(intersections)):
+                            dist_sq = (intersections[i] - intersections[j]).length_sq()
+                            if dist_sq > max_dist_sq:
+                                max_dist_sq = dist_sq
+                                p1, p2 = intersections[i], intersections[j]
+                
+                if p1 and p2:
+                    edge_to_prune.start = p1
+                    edge_to_prune.end = p2
 
     def _clip_edges(self, edges):
         if not edges: return []
@@ -519,7 +584,12 @@ class Application(tk.Tk):
         self.title("Voronoi 圖產生器 (600x600 View)")
         self.geometry(f"{self.visible_width + 250}x{self.visible_height + 50}")
         self.resizable(False, False)
+        
+        # [MODIFIED] 初始化點、步驟、以及測資瀏覽的狀態
         self.points, self.voronoi_steps, self.current_step = [], [], 0
+        self.all_test_cases = []
+        self.current_test_case_index = -1
+        
         self._create_widgets()
 
     def _create_widgets(self):
@@ -560,13 +630,29 @@ class Application(tk.Tk):
         ttk.Button(point_frame, text="從檔案載入", command=self.load_points_from_file).pack(fill=tk.X, pady=(5,0))
         ttk.Button(point_frame, text="清除畫布", command=self.clear_canvas).pack(fill=tk.X, pady=(5,0))
 
-        run_frame = ttk.LabelFrame(control_frame, text="2. 執行演算法", padding=10)
+        # [NEW] 新增測資瀏覽控制面板
+        case_nav_frame = ttk.LabelFrame(control_frame, text="2. 測資瀏覽", padding=10)
+        case_nav_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        case_buttons_frame = ttk.Frame(case_nav_frame)
+        case_buttons_frame.pack(fill=tk.X)
+        
+        self.prev_case_button = ttk.Button(case_buttons_frame, text="上一筆測資", command=self.prev_test_case, state=tk.DISABLED)
+        self.prev_case_button.pack(side=tk.LEFT, expand=True, fill=tk.X)
+        
+        self.next_case_button = ttk.Button(case_buttons_frame, text="下一筆測資", command=self.next_test_case, state=tk.DISABLED)
+        self.next_case_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(5,0))
+
+        self.case_label = ttk.Label(case_nav_frame, text="未載入檔案", anchor="center")
+        self.case_label.pack(fill=tk.X, pady=5)
+
+        run_frame = ttk.LabelFrame(control_frame, text="3. 執行演算法", padding=10)
         run_frame.pack(fill=tk.X, pady=(0, 10))
         ttk.Button(run_frame, text="執行 (一次完成)", command=self.run_normal).pack(fill=tk.X)
         ttk.Button(run_frame, text="產生步驟", command=self.run_step_by_step_generate).pack(fill=tk.X, pady=5)
         ttk.Button(run_frame, text="將目前點寫入檔案", command=self.save_points_to_file).pack(fill=tk.X, pady=(0, 5))
         
-        step_frame = ttk.LabelFrame(control_frame, text="3. 單步執行控制", padding=10)
+        step_frame = ttk.LabelFrame(control_frame, text="4. 單步執行控制", padding=10)
         step_frame.pack(fill=tk.X)
         
         nav_frame = ttk.Frame(step_frame)
@@ -579,7 +665,19 @@ class Application(tk.Tk):
         self.step_label = ttk.Label(step_frame, text="尚未產生步驟", anchor="center")
         self.step_label.pack(fill=tk.X, pady=5)
 
+    def _reset_to_custom_mode(self):
+        """ [NEW] 當使用者手動新增點時，重置測資瀏覽狀態 """
+        if self.current_test_case_index != -1:
+            self.all_test_cases.clear()
+            self.current_test_case_index = -1
+            self.points.clear()
+            self.canvas.delete("all")
+            self.case_label.config(text="自訂義點集")
+            self.prev_case_button.config(state=tk.DISABLED)
+            self.next_case_button.config(state=tk.DISABLED)
+
     def add_point_on_click(self, event):
+        self._reset_to_custom_mode()
         comp_x = event.x + self.comp_offset_x
         comp_y = (self.visible_height - event.y) + self.comp_offset_y
         self.points.append(Point(comp_x, comp_y))
@@ -593,6 +691,7 @@ class Application(tk.Tk):
             y_val = float(self.y_entry.get())
             
             if 0 <= x_val <= self.visible_width and 0 <= y_val <= self.visible_height:
+                self._reset_to_custom_mode()
                 comp_x = x_val + self.comp_offset_x
                 comp_y = y_val + self.comp_offset_y
                 self.points.append(Point(comp_x, comp_y))
@@ -608,13 +707,14 @@ class Application(tk.Tk):
             messagebox.showerror("無效輸入", "請在 X 和 Y 座標欄位中輸入有效的數字。")
 
     def generate_random_points(self):
-        self.clear_canvas()
+        self.clear_canvas() # 清除所有東西，包括測資
         try:
             num = int(self.random_points_entry.get())
             for _ in range(num):
                 rand_x_vis = random.randint(10, self.visible_width - 10)
                 rand_y_vis = random.randint(10, self.visible_height - 10)
                 self.points.append(Point(rand_x_vis + self.comp_offset_x, rand_y_vis + self.comp_offset_y))
+            self.case_label.config(text="自訂義點集")
         except (ValueError, TypeError): messagebox.showerror("無效輸入", "請輸入一個有效的整數。")
         self.draw_points(self.points)
         
@@ -647,48 +747,6 @@ class Application(tk.Tk):
                 i += 1
         return test_cases
 
-    def _show_test_case_selection_dialog(self, test_cases):
-        dialog = tk.Toplevel(self)
-        dialog.title("選擇要載入的測資")
-        dialog.geometry("300x400")
-        dialog.transient(self)
-        dialog.grab_set()
-
-        ttk.Label(dialog, text="在檔案中找到以下測資：").pack(pady=10)
-        listbox_frame = ttk.Frame(dialog)
-        listbox_frame.pack(pady=5, padx=10, fill=tk.BOTH, expand=True)
-
-        listbox = tk.Listbox(listbox_frame, selectmode=tk.SINGLE, font=("Arial", 10))
-        for case in test_cases: listbox.insert(tk.END, case["name"])
-        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        scrollbar = ttk.Scrollbar(listbox_frame, orient=tk.VERTICAL, command=listbox.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        listbox.config(yscrollcommand=scrollbar.set)
-        if test_cases: listbox.selection_set(0)
-
-        def on_load():
-            selection_indices = listbox.curselection()
-            if not selection_indices: return
-            
-            selected_points_raw = test_cases[selection_indices[0]]["points"]
-            self.clear_canvas()
-            self.points = [Point(p.x + self.comp_offset_x, p.y + self.comp_offset_y) for p in selected_points_raw]
-            self.draw_points(self.points)
-            dialog.destroy()
-
-        button_frame = ttk.Frame(dialog)
-        button_frame.pack(pady=10)
-        ttk.Button(button_frame, text="載入選取項目", command=on_load).pack(side=tk.LEFT, padx=5)
-        ttk.Button(button_frame, text="取消", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
-
-        self.update_idletasks()
-        x = self.winfo_x() + (self.winfo_width() // 2) - (dialog.winfo_width() // 2)
-        y = self.winfo_y() + (self.winfo_height() // 2) - (dialog.winfo_height() // 2)
-        dialog.geometry(f"+{x}+{y}")
-        dialog.focus_set()
-
-
     def load_points_from_file(self):
         file_path = filedialog.askopenfilename(
             title="選擇一個測資檔案",
@@ -700,14 +758,53 @@ class Application(tk.Tk):
             with open(file_path, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
             
+            # [MODIFIED] 解析檔案中的所有測資
             test_cases = self._parse_test_cases(lines)
             if not test_cases:
-                messagebox.showwarning("無效檔案", "在檔案中找不到任何有效的測資。請確保格式正確（第一行為點數N，後續為N個座標）。")
+                messagebox.showwarning("無有效測資", "在檔案中找不到任何有效的測資。")
                 return
 
-            self._show_test_case_selection_dialog(test_cases)
+            self.clear_canvas() # 清除目前狀態
+            self.all_test_cases = test_cases
+            self.current_test_case_index = 0
+            self._load_current_test_case() # 載入第一筆測資
+
         except Exception as e:
             messagebox.showerror("讀取失敗", f"讀取或解析檔案時發生錯誤: {e}")
+
+    def _load_current_test_case(self):
+        """ [NEW] 載入並顯示當前索引的測資 """
+        if not self.all_test_cases or not (0 <= self.current_test_case_index < len(self.all_test_cases)):
+            return
+
+        # 清除畫布和演算法步驟，但保留測資列表
+        self.points.clear()
+        self.reset_steps()
+        self.canvas.delete("all")
+        
+        # 載入新點
+        case_data = self.all_test_cases[self.current_test_case_index]
+        self.points = [Point(p.x + self.comp_offset_x, p.y + self.comp_offset_y) for p in case_data["points"]]
+        
+        self.draw_points(self.points)
+        
+        # 更新GUI狀態
+        total_cases = len(self.all_test_cases)
+        self.case_label.config(text=f"測資 {self.current_test_case_index + 1}/{total_cases}")
+        self.prev_case_button.config(state=tk.NORMAL if self.current_test_case_index > 0 else tk.DISABLED)
+        self.next_case_button.config(state=tk.NORMAL if self.current_test_case_index < total_cases - 1 else tk.DISABLED)
+
+    def next_test_case(self):
+        """ [NEW] 切換到下一筆測資 """
+        if self.current_test_case_index < len(self.all_test_cases) - 1:
+            self.current_test_case_index += 1
+            self._load_current_test_case()
+
+    def prev_test_case(self):
+        """ [NEW] 切換到上一筆測資 """
+        if self.current_test_case_index > 0:
+            self.current_test_case_index -= 1
+            self._load_current_test_case()
 
     def _filter_isolated_edges(self, edges, l_count=None, r_count=None):
         if not edges: return []
@@ -857,8 +954,16 @@ class Application(tk.Tk):
         self.next_button.config(state=tk.NORMAL if self.current_step < len(self.voronoi_steps) - 1 else tk.DISABLED)
 
     def clear_canvas(self):
+        """ [MODIFIED] 清除所有內容，包括畫布、點、演算法步驟和已載入的測資。 """
         self.points.clear()
         self.reset_steps()
+        
+        self.all_test_cases.clear()
+        self.current_test_case_index = -1
+        self.case_label.config(text="未載入檔案")
+        self.prev_case_button.config(state=tk.DISABLED)
+        self.next_case_button.config(state=tk.DISABLED)
+        
         self.canvas.delete("all")
 
     def reset_steps(self):
@@ -869,8 +974,6 @@ class Application(tk.Tk):
         self.next_button.config(state=tk.DISABLED)
 
     def draw_points(self, points_to_draw):
-        # [MODIFIED] This is now a helper function. It no longer clears the canvas.
-        # It draws the points passed to it as an argument.
         for p_comp in points_to_draw:
             vis_x = p_comp.x - self.comp_offset_x
             vis_y = p_comp.y - self.comp_offset_y
@@ -920,7 +1023,6 @@ class Application(tk.Tk):
                 p2, code2 = Point(x, y), _get_code(Point(x, y))
 
     def draw_all(self, points, left_edges, right_edges, hyperplane, convex_hull_pts, is_final_run=False):
-        # [MODIFIED] This function now orchestrates all drawing for a step.
         self.canvas.delete("all")
 
         def get_drawable_edge(edge):
@@ -958,7 +1060,6 @@ class Application(tk.Tk):
                     p1, p2 = drawable_pts
                     self.canvas.create_line(p1.x, self.visible_height - p1.y, p2.x, self.visible_height - p2.y, fill="green", width=2)
         
-        # Finally, draw the points for the current step
         self.draw_points(points)
 
 if __name__ == "__main__":
