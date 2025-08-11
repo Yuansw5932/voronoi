@@ -299,6 +299,10 @@ class VoronoiDiagram:
         
         last_v_pt = None
         loop_count = 0
+
+        # [新增] 用於追蹤前一個被標記為 used 的邊
+        prev_used_edge_info = None
+
         while True:
             loop_count += 1
             if loop_count > (len(left_points) + len(right_points)) * 4:
@@ -315,7 +319,12 @@ class VoronoiDiagram:
                     break
 
             l_is_pt, l_is_idx = self._find_near_intra_is(bisector, l_edges, search_origin)
+            print(loop_count)
+            print("L:")
+            print(l_is_pt,l_is_idx)
             r_is_pt, r_is_idx = self._find_near_intra_is(bisector, r_edges, search_origin)
+            print("R")
+            print(r_is_pt,r_is_idx)
             
             near_is_pt, choose_dir, near_is_idx = self._find_near_inter_is(bisector, l_is_pt, r_is_pt, l_is_idx, r_is_idx)
 
@@ -337,8 +346,21 @@ class VoronoiDiagram:
             if last_v_pt is None or (near_is_pt and is_lower):
                 break
 
-            if choose_dir == 1 and near_is_idx != -1: l_edges[near_is_idx].used = True
-            elif choose_dir == 2 and near_is_idx != -1: r_edges[near_is_idx].used = True
+            # [MODIFIED] 實作取消 used 狀態的邏輯
+            # 1. 如果之前有標記過的邊，先取消它的 used 狀態
+            if prev_used_edge_info:
+                edge_list, edge_index = prev_used_edge_info
+                if 0 <= edge_index < len(edge_list):
+                    edge_list[edge_index].used = False
+                prev_used_edge_info = None # 清空追蹤器
+
+            # 2. 標記當前找到的邊為 used，並記錄它以便下一輪取消
+            if choose_dir == 1 and near_is_idx != -1: 
+                l_edges[near_is_idx].used = True
+                prev_used_edge_info = (l_edges, near_is_idx)
+            elif choose_dir == 2 and near_is_idx != -1: 
+                r_edges[near_is_idx].used = True
+                prev_used_edge_info = (r_edges, near_is_idx)
 
             scan_line = self._move_scan_next_loop(scan_line, l_edges, r_edges, l_is_idx, r_is_idx, choose_dir)
 
@@ -449,6 +471,7 @@ class VoronoiDiagram:
 
     def _move_scan_next_loop(self, scan_line, l_edges, r_edges, l_idx, r_idx, choose):
         new_start, new_end = scan_line.norm_start, scan_line.norm_end
+        print(new_start,new_end)
         edge_to_check = None
         if choose == 1 and l_idx != -1:
             edge_to_check = l_edges[l_idx]
@@ -549,18 +572,49 @@ class VoronoiDiagram:
                     edge_to_prune.start = p1
                     edge_to_prune.end = p2
 
-    def _clip_edges(self, edges):
-        if not edges: return []
+    def _clip_edges(self, edges, prefix="Edge"):
+        """
+        [DEBUG_VERSION] 對邊進行裁剪，並附有詳細日誌輸出。
+        - prefix: 用於日誌輸出的邊類型標籤 (L, R, H 等)。
+        """
+        print(f"\n[CLIP_DEBUG] --- 開始執行 _clip_edges for {prefix} Edges ---")
+        print(f"[CLIP_DEBUG] 輸入邊數: {len(edges)}")
+        if not edges:
+            return []
         clipped = []
-        for edge in edges:
-            if not isinstance(edge, Edge): continue
+        for i, edge in enumerate(edges):
+            # [FORMAT FIX] 修正日誌標籤格式，移除括號，變為 L0, H0 等
+            edge_label = f"{prefix}{i}"
+            print(f"\n[CLIP_DEBUG] --- 正在檢查 {edge_label}: {edge} ---")
+
+            if not isinstance(edge, Edge):
+                print(f"[CLIP_DEBUG]   - 結果: \033[91m丟棄 (DISCARDED) - 非 Edge 物件\033[0m")
+                continue
+            
             p1_copy, p2_copy = Point(edge.start.x, edge.start.y), Point(edge.end.x, edge.end.y)
             clipped_edge = self._cohen_sutherland_clip(p1_copy, p2_copy)
+            
+            print(f"[CLIP_DEBUG]   - 裁剪前: S={edge.start}, E={edge.end}")
+            if clipped_edge:
+                print(f"[CLIP_DEBUG]   - 裁剪後: S={clipped_edge[0]}, E={clipped_edge[1]}")
+            else:
+                print(f"[CLIP_DEBUG]   - 裁剪後: None (完全位於邊界外)")
+
             if clipped_edge:
                 p1, p2 = clipped_edge
                 if not Point.is_similar(p1, p2):
                     new_edge = Line(p1, p2, getattr(edge, 'norm_start', None), getattr(edge, 'norm_end', None))
                     clipped.append(new_edge)
+                    print(f"[CLIP_DEBUG]   - 判斷: 裁剪後長度有效。")
+                    print(f"[CLIP_DEBUG]   - 結果: \033[92m保留 (KEPT)\033[0m")
+                else:
+                    print(f"[CLIP_DEBUG]   - 判斷: 裁剪後長度過短 (p1 和 p2 極度相似)。")
+                    print(f"[CLIP_DEBUG]   - 結果: \033[91m丟棄 (DISCARDED) - 長度過短\033[0m")
+            else:
+                print(f"[CLIP_DEBUG]   - 結果: \033[91m丟棄 (DISCARDED) - 完全裁剪\033[0m")
+        
+        print(f"\n[CLIP_DEBUG] --- 裁剪完成 for {prefix} Edges ---")
+        print(f"[CLIP_DEBUG] 總結: 輸入 {len(edges)} 條邊, 保留 {len(clipped)} 條邊。")
         return clipped
     
     def _cohen_sutherland_clip(self, p1, p2):
@@ -827,44 +881,77 @@ class Application(tk.Tk):
             self._load_current_test_case()
 
     def _filter_isolated_edges(self, edges, l_count=None, r_count=None):
-        if not edges: return []
+        """
+        [DEBUG_VERSION] 使用“端點計數法”，並將日誌輸出格式改為 L0, H0 等。
+        """
+        print("\n[FILTER_DEBUG] --- 開始執行 _filter_isolated_edges ---")
+        print(f"[FILTER_DEBUG] 輸入邊數: {len(edges)}")
+        if not edges: 
+            print("[FILTER_DEBUG] --- 邊列表為空，提前結束 ---")
+            return []
 
+        # [新增] 用於產生 L0, R0, H0 格式標籤的輔助函式
         def get_edge_label(index):
-            if l_count is None or r_count is None: return f"Edge[{index}]"
-            if index < l_count: return f"L[{index}]"
-            elif index < l_count + r_count: return f"R[{index - l_count}]"
-            else: return f"H[{index - l_count - r_count}]"
+            # 如果沒有提供左右邊的數量，則使用備用格式
+            if l_count is None or r_count is None: 
+                return f"Edge[{index}]"
+            
+            r_start_index = l_count
+            h_start_index = l_count + r_count
 
-        def is_on_boundary(p, tol=1e-5):
-            return (math.isclose(p.x, 0, abs_tol=tol) or
-                    math.isclose(p.x, self.comp_width, abs_tol=tol) or
-                    math.isclose(p.y, 0, abs_tol=tol) or
-                    math.isclose(p.y, self.comp_height, abs_tol=tol))
+            if index < r_start_index:
+                return f"L[{index}]"
+            elif index < h_start_index:
+                return f"R[{index - r_start_index}]"
+            else:
+                return f"H[{index - h_start_index}]"
 
-        def _is_point_on_segment(p, seg, tol=1e-5):
-            cross_product = (p.y - seg.start.y) * (seg.end.x - seg.start.x) - \
-                            (p.x - seg.start.x) * (seg.end.y - seg.start.y)
-            if not math.isclose(cross_product, 0, abs_tol=tol): return False
-            on_x = min(seg.start.x, seg.end.x) - tol <= p.x <= max(seg.start.x, seg.end.x) + tol
-            on_y = min(seg.start.y, seg.end.y) - tol <= p.y <= max(seg.start.y, seg.end.y) + tol
-            return on_x and on_y
+        # 步驟 1: 使用 Counter 統計每個端點（Vertex）出現的次數
+        endpoint_counts = Counter()
+        for edge in edges:
+            endpoint_counts[edge.start.__hash__()] += 1
+            endpoint_counts[edge.end.__hash__()] += 1
+
+        print("[FILTER_DEBUG] 步驟 1: 端點計數完成。")
 
         kept_edges = []
-        for i, edge_i in enumerate(edges):
-            is_internal_edge = not is_on_boundary(edge_i.start) and not is_on_boundary(edge_i.end)
-            start_conn, end_conn = False, False
+        # 步驟 2: 遍歷所有邊，根據新的保留規則進行過濾
+        print("\n[FILTER_DEBUG] 步驟 2: 開始過濾每一條邊...")
+        for i, edge in enumerate(edges):
+            # [MODIFIED] 使用 get_edge_label 產生標籤
+            edge_label = get_edge_label(i)
+            print(f"\n[FILTER_DEBUG] --- 正在檢查 {edge_label}: {edge} ---")
 
-            for j, edge_j in enumerate(edges):
-                if i == j: continue
-                if not start_conn and _is_point_on_segment(edge_i.start, edge_j): start_conn = True
-                if not end_conn and _is_point_on_segment(edge_i.end, edge_j): end_conn = True
-                if start_conn and end_conn: break
+            start_hash = edge.start.__hash__()
+            end_hash = edge.end.__hash__()
+
+            start_degree = endpoint_counts.get(start_hash, 0)
+            end_degree = endpoint_counts.get(end_hash, 0)
+
+            is_start_on_boundary = edge.start.is_on_boundary(self.comp_width, self.comp_height)
+            is_end_on_boundary = edge.end.is_on_boundary(self.comp_width, self.comp_height)
             
-            if is_internal_edge:
-                if start_conn and end_conn: kept_edges.append(edge_i)
+            print(f"[FILTER_DEBUG]   - 起點: {edge.start}")
+            print(f"[FILTER_DEBUG]     - 計數 (Degree): {start_degree}")
+            print(f"[FILTER_DEBUG]     - 是否在邊界上: {is_start_on_boundary}")
+
+            print(f"[FILTER_DEBUG]   - 終點: {edge.end}")
+            print(f"[FILTER_DEBUG]     - 計數 (Degree): {end_degree}")
+            print(f"[FILTER_DEBUG]     - 是否在邊界上: {is_end_on_boundary}")
+
+            is_start_well_connected = start_degree > 1 or is_start_on_boundary
+            is_end_well_connected = end_degree > 1 or is_end_on_boundary
+            
+            print(f"[FILTER_DEBUG]   - 判斷: 起點是否良好連接? {is_start_well_connected} | 終點是否良好連接? {is_end_well_connected}")
+
+            if is_start_well_connected and is_end_well_connected:
+                kept_edges.append(edge)
+                print(f"[FILTER_DEBUG]   - 結果: \033[92m保留 (KEPT) {edge_label}\033[0m")
             else:
-                if start_conn or end_conn: kept_edges.append(edge_i)
-                    
+                print(f"[FILTER_DEBUG]   - 結果: \033[91m丟棄 (DISCARDED) {edge_label}\033[0m")
+        
+        print(f"\n[FILTER_DEBUG] --- 過濾完成 ---")
+        print(f"[FILTER_DEBUG] 總結: 輸入 {len(edges)} 條邊, 保留 {len(kept_edges)} 條邊。")
         return kept_edges
 
     def run_normal(self):
