@@ -16,8 +16,9 @@ class StepRecord:
     [MODIFIED] 用於儲存演算法每一步的狀態。
     - 新增 all_points: 儲存最一開始的所有點，用於繪製背景點。
     - 新增 left_hull, right_hull: 儲存合併前左右子集的凸包。
+    - 新增 collision_info: 儲存超平面追蹤時的碰撞日誌。
     """
-    def __init__(self, description, points, all_points=None, left_edges=None, right_edges=None, hyperplane=None, convex_hull=None, left_hull=None, right_hull=None):
+    def __init__(self, description, points, all_points=None, left_edges=None, right_edges=None, hyperplane=None, convex_hull=None, left_hull=None, right_hull=None, collision_info=None):
         self.description = description
         # Active points for this step
         self.points = [Point(p.x, p.y) for p in points]
@@ -29,6 +30,7 @@ class StepRecord:
         self.convex_hull = Polygon(points=[Point(p.x, p.y) for p in convex_hull.points]) if convex_hull and convex_hull.points else None
         self.left_hull = Polygon(points=[Point(p.x, p.y) for p in left_hull.points]) if left_hull and left_hull.points else None
         self.right_hull = Polygon(points=[Point(p.x, p.y) for p in right_hull.points]) if right_hull and right_hull.points else None
+        self.collision_info = collision_info
 
 
 class Trend:
@@ -55,7 +57,7 @@ class Point:
     def __mul__(self, scalar): return Point(self.x * scalar, self.y * scalar)
     def __truediv__(self, scalar): return Point(self.x / scalar, self.y / scalar) if scalar != 0 else Point(float('inf'), float('inf'))
     def __eq__(self, other): return isinstance(other, Point) and math.isclose(self.x, other.x) and math.isclose(self.y, other.y)
-    def __hash__(self): return hash((self.x, self.y))
+    def __hash__(self): return hash((round(self.x, 5), round(self.y, 5)))
     def __repr__(self): return f"P({self.x:.1f}, {self.y:.1f})"
     def length_sq(self): return self.x**2 + self.y**2
     def is_on_boundary(self, w, h): return math.isclose(self.x, 0) or math.isclose(self.x, w) or math.isclose(self.y, 0) or math.isclose(self.y, h)
@@ -135,25 +137,38 @@ class Polygon:
         a_pts, b_pts = hull_a.points, hull_b.points
         a_size, b_size = len(a_pts), len(b_pts)
         if not a_pts or not b_pts: return 0,0,0,0
+        
+        # 找到 a 的最右點和 b 的最左點
         idx_a, idx_b = max(range(a_size), key=lambda i: a_pts[i].x), min(range(b_size), key=lambda i: b_pts[i].x)
+        
+        # --- 計算上公切線 ---
         upper_a, upper_b = idx_a, idx_b
         done = False
         while not done:
             done = True
-            while Polygon._orientation(b_pts[upper_b], a_pts[upper_a], a_pts[(upper_a + 1) % a_size]) >= 0:
+            # [FIX] 將 >= 和 <= 改為 > 和 <，以正確處理共線點，避免震盪
+            while Polygon._orientation(b_pts[upper_b], a_pts[upper_a], a_pts[(upper_a + 1) % a_size]) > 0:
                 upper_a = (upper_a + 1) % a_size
-            while Polygon._orientation(a_pts[upper_a], b_pts[upper_b], b_pts[(b_size + upper_b - 1) % b_size]) <= 0:
+                done = False
+                    
+            while Polygon._orientation(a_pts[upper_a], b_pts[upper_b], b_pts[(b_size + upper_b - 1) % b_size]) < 0:
                 upper_b = (b_size + upper_b - 1) % b_size
                 done = False
+        
+        # --- 計算下公切線 ---
         lower_a, lower_b = idx_a, idx_b
         done = False
         while not done:
             done = True
-            while Polygon._orientation(a_pts[lower_a], b_pts[lower_b], b_pts[(lower_b + 1) % b_size]) >= 0:
+            # [FIX] 將 >= 和 <= 改為 > 和 <，以正確處理共線點，避免震盪
+            while Polygon._orientation(a_pts[lower_a], b_pts[lower_b], b_pts[(lower_b + 1) % b_size]) > 0:
                 lower_b = (lower_b + 1) % b_size
-            while Polygon._orientation(b_pts[lower_b], a_pts[lower_a], a_pts[(a_size + lower_a - 1) % a_size]) <= 0:
+                done = False
+            
+            while Polygon._orientation(b_pts[lower_b], a_pts[lower_a], a_pts[(a_size + lower_a - 1) % a_size]) < 0:
                 lower_a = (a_size + lower_a - 1) % a_size
                 done = False
+
         return upper_a, upper_b, lower_a, lower_b
 
 # --- 2. VORONOI 圖演算法類別 ---
@@ -286,7 +301,8 @@ class VoronoiDiagram:
                 right_edges=self._clip_edges(right_edges), 
                 convex_hull=merged_hull,
                 left_hull=left_hull,
-                right_hull=right_hull
+                right_hull=right_hull,
+                collision_info="找到左右凸包的上下公切線。"
             ))
 
         hyperplane, scan_trends = [], []
@@ -327,6 +343,16 @@ class VoronoiDiagram:
                 segment = Line(start_pt, end_pt, scan_line.norm_start, scan_line.norm_end)
                 hyperplane.append(segment)
                 scan_trends.append(Trend(direction=choose_dir, index=near_is_idx))
+
+                if step_mode:
+                    info = "已到達下公切線，或找不到下一個交點。\n新增最後一條射線。"
+                    self.steps.append(StepRecord(
+                        f"步驟 2/5: 追蹤超平面 (段 {len(hyperplane)})",
+                        points=left_points + right_points, all_points=all_points,
+                        left_edges=self._clip_edges(l_edges), right_edges=self._clip_edges(r_edges),
+                        hyperplane=self._clip_edges(hyperplane), convex_hull=Polygon.build_hull(left_points + right_points),
+                        collision_info=info
+                    ))
                 break 
             
             end_pt = near_is_pt
@@ -335,6 +361,18 @@ class VoronoiDiagram:
             segment = Line(start_pt, end_pt, scan_line.norm_start, scan_line.norm_end)
             hyperplane.append(segment)
             scan_trends.append(Trend(direction=choose_dir, index=near_is_idx))
+
+            if step_mode:
+                side = 'L' if choose_dir == 1 else 'R'
+                info_pt_str = f"P({end_pt.x:.1f}, {end_pt.y:.1f})"
+                info = f"超平面撞到 {side}{near_is_idx} 於點 {info_pt_str}"
+                self.steps.append(StepRecord(
+                    f"步驟 2/5: 追蹤超平面 (段 {len(hyperplane)})",
+                    points=left_points + right_points, all_points=all_points,
+                    left_edges=self._clip_edges(l_edges), right_edges=self._clip_edges(r_edges),
+                    hyperplane=self._clip_edges(hyperplane), convex_hull=Polygon.build_hull(left_points + right_points),
+                    collision_info=info
+                ))
 
             if prev_used_edge_info:
                 edge_list, edge_index = prev_used_edge_info
@@ -350,19 +388,8 @@ class VoronoiDiagram:
 
             scan_line = self._move_scan_next_loop(scan_line, l_edges, r_edges, l_is_idx, r_is_idx, choose_dir)
 
-        if step_mode: 
-            self.steps.append(StepRecord(
-                "步驟 2/5: 追蹤超平面", 
-                points=left_points + right_points, 
-                all_points=all_points,
-                left_edges=self._clip_edges(l_edges),
-                right_edges=self._clip_edges(r_edges),
-                hyperplane=self._clip_edges(hyperplane),
-                convex_hull=Polygon.build_hull(left_points + right_points)
-            ))
-        
         self._update_trend(hyperplane, scan_trends)
-        pruned_vertices = self._elimination(hyperplane, scan_trends, l_edges, r_edges)
+        pruned_vertices_hashes = self._elimination(hyperplane, scan_trends, l_edges, r_edges)
         
         if step_mode: 
             self.steps.append(StepRecord(
@@ -372,10 +399,12 @@ class VoronoiDiagram:
                 left_edges=self._clip_edges(l_edges), 
                 right_edges=self._clip_edges(r_edges), 
                 hyperplane=self._clip_edges(hyperplane),
-                convex_hull=Polygon.build_hull(left_points + right_points)
+                convex_hull=Polygon.build_hull(left_points + right_points),
+                collision_info="根據超平面的轉向，修剪與其相交的舊邊緣。"
             ))
 
-        l_edges, r_edges = self._cascade_delete_internal_edges(l_edges, r_edges, pruned_vertices)
+        # --- [MODIFICATION] Pass hyperplane to cascade delete ---
+        l_edges, r_edges = self._cascade_delete_internal_edges(l_edges, r_edges, pruned_vertices_hashes, hyperplane)
 
         if step_mode:
              self.steps.append(StepRecord(
@@ -385,7 +414,8 @@ class VoronoiDiagram:
                 left_edges=self._clip_edges(l_edges),
                 right_edges=self._clip_edges(r_edges),
                 hyperplane=self._clip_edges(hyperplane),
-                convex_hull=Polygon.build_hull(left_points + right_points)
+                convex_hull=Polygon.build_hull(left_points + right_points),
+                collision_info="刪除因消線而產生的所有懸空內部邊緣。"
             ))
             
         final_l_edges = l_edges
@@ -431,7 +461,10 @@ class VoronoiDiagram:
             u = u_num / den
 
             epsilon = 1e-9
-            if (0.0 - epsilon <= u <= 1.0 + epsilon) and (t > t_origin + epsilon / 10): 
+            # [FIXED] Changed t > t_origin + epsilon / 10 to t > t_origin - epsilon
+            # This allows detection of intersections at the search_origin (3-way vertices)
+            # by creating a small tolerance window.
+            if (0.0 - epsilon <= u <= 1.0 + epsilon) and (t > t_origin - epsilon): 
                 if t < min_t:
                     min_t = t
                     x = p1.x + t * (p2.x - p1.x)
@@ -455,10 +488,10 @@ class VoronoiDiagram:
         edge_to_check = None
         if choose == 1 and l_idx != -1:
             edge_to_check = l_edges[l_idx]
-            new_start = edge_to_check.norm_end if new_start == edge_to_check.norm_start else edge_to_check.norm_start
+            new_start = edge_to_check.norm_end if Point.is_similar(new_start, edge_to_check.norm_start) else edge_to_check.norm_start
         elif choose == 2 and r_idx != -1:
             edge_to_check = r_edges[r_idx]
-            new_end = edge_to_check.norm_end if new_end == edge_to_check.norm_start else edge_to_check.norm_start
+            new_end = edge_to_check.norm_end if Point.is_similar(new_end, edge_to_check.norm_start) else edge_to_check.norm_start
         
         return Line(new_start, new_end)
 
@@ -475,6 +508,8 @@ class VoronoiDiagram:
 
     def _elimination(self, hyperplane, scan_trends, l_edges, r_edges):
         pruning_map = {}
+        # --- [MODIFICATION] This set will store the hashes of pruned vertices ---
+        pruned_vertices_hashes = set()
 
         for i in range(len(hyperplane) - 1):
             edge_info = scan_trends[i]
@@ -527,15 +562,29 @@ class VoronoiDiagram:
                 v_to_start = edge_to_prune.start - intersection_pt
                 cross_prod_end = Point.cross_product(v_hyper, v_to_end)
                 cross_prod_start = Point.cross_product(v_hyper, v_to_start)
+                
+                # --- [MODIFICATION] Add the hash of the old, pruned vertex ---
+                original_start_hash = edge_to_prune.start.__hash__()
+                original_end_hash = edge_to_prune.end.__hash__()
 
-                if original_turn.trend == 1:
-                    if cross_prod_end < cross_prod_start: edge_to_prune.end = intersection_pt
-                    else: edge_to_prune.start = intersection_pt
-                elif original_turn.trend == 2:
-                    if cross_prod_end > cross_prod_start: edge_to_prune.end = intersection_pt
-                    else: edge_to_prune.start = intersection_pt
+                if original_turn.trend == 1: # Left turn (CCW)
+                    if cross_prod_end < cross_prod_start:
+                        pruned_vertices_hashes.add(original_end_hash)
+                        edge_to_prune.end = intersection_pt
+                    else:
+                        pruned_vertices_hashes.add(original_start_hash)
+                        edge_to_prune.start = intersection_pt
+                elif original_turn.trend == 2: # Right turn (CW)
+                    if cross_prod_end > cross_prod_start:
+                        pruned_vertices_hashes.add(original_end_hash)
+                        edge_to_prune.end = intersection_pt
+                    else:
+                        pruned_vertices_hashes.add(original_start_hash)
+                        edge_to_prune.start = intersection_pt
 
             elif len(intersections) >= 2:
+                pruned_vertices_hashes.add(edge_to_prune.start.__hash__())
+                pruned_vertices_hashes.add(edge_to_prune.end.__hash__())
                 p1, p2 = None, None
                 if len(intersections) == 2:
                     p1, p2 = intersections[0], intersections[1]
@@ -551,34 +600,86 @@ class VoronoiDiagram:
                 if p1 and p2:
                     edge_to_prune.start = p1
                     edge_to_prune.end = p2
-    def _cascade_delete_internal_edges(self, l_edges, r_edges, pruned_vertices_hashes):
+        
+        # --- [MODIFICATION] Return the collected hashes ---
+        return pruned_vertices_hashes
+
+    def _cascade_delete_internal_edges(self, l_edges, r_edges, pruned_vertices_hashes, hyperplane):
         """
-        [NEW] 實現連鎖刪除。
-        從被裁切掉的舊頂點開始，使用BFS刪除所有內部冗餘的邊。
+        [MODIFIED] Complete rewrite of this function to implement BFS cascade deletion.
+        It starts from pruned vertices and deletes connected edges until it hits an "anchor"
+        (the new hyperplane or the bounding box).
         """
         if not pruned_vertices_hashes:
             return l_edges, r_edges
 
         all_edges = l_edges + r_edges
-        adj = {} # 鄰接表: vertex_hash -> [edge_indices]
+        adj = {} 
+        hash_to_point = {}
 
-        # 1. 建立鄰接表
+        # 1. Build adjacency list and a hash-to-point mapping for all old edges
         for i, edge in enumerate(all_edges):
-            # 使用 __hash__ 來唯一識別 Point 物件
-            start_hash, end_hash = edge.start.__hash__(), edge.end.__hash__()
-            if start_hash not in adj: adj[start_hash] = []
-            if end_hash not in adj: adj[end_hash] = []
-            adj[start_hash].append(i)
-            adj[end_hash].append(i)
+            for p in [edge.start, edge.end]:
+                p_hash = p.__hash__()
+                if p_hash not in adj:
+                    adj[p_hash] = []
+                    hash_to_point[p_hash] = p
+                adj[p_hash].append(i)
 
-        # 2. BFS 連鎖刪除
+        # 2. Identify "anchor" vertices from the new hyperplane. These stop the deletion.
+        anchor_hashes = set()
+        for edge in hyperplane:
+            anchor_hashes.add(edge.start.__hash__())
+            anchor_hashes.add(edge.end.__hash__())
+
+        # 3. BFS to find all deletable edges
         queue = list(pruned_vertices_hashes)
         visited_hashes = set(pruned_vertices_hashes)
         deleted_edge_indices = set()
 
         while queue:
             vertex_hash = queue.pop(0)
+            vertex_point = hash_to_point.get(vertex_hash)
             
+            # STOPPING CONDITIONS for the BFS path:
+            # - Stop if the vertex is part of the new hyperplane (it's an anchor).
+            # - Stop if the vertex is on the main computational boundary (it's a valid ray).
+            if vertex_hash in anchor_hashes or \
+               (vertex_point and vertex_point.is_on_boundary(self.width, self.height)):
+                continue
+            
+            # If the vertex has no connections in the old graph, stop.
+            if vertex_hash not in adj:
+                continue
+
+            # Process all connected old edges
+            for edge_idx in adj[vertex_hash]:
+                if edge_idx in deleted_edge_indices:
+                    continue
+                
+                # Mark this edge for deletion
+                deleted_edge_indices.add(edge_idx)
+                
+                # Find the endpoint on the other side to continue the search
+                edge = all_edges[edge_idx]
+                other_vertex_hash = edge.end.__hash__() if edge.start.__hash__() == vertex_hash else edge.start.__hash__()
+                
+                if other_vertex_hash not in visited_hashes:
+                    visited_hashes.add(other_vertex_hash)
+                    queue.append(other_vertex_hash)
+
+        # 4. Reconstruct the edge lists, keeping only the non-deleted edges
+        final_l_edges, final_r_edges = [], []
+        num_l_edges = len(l_edges)
+        for i, edge in enumerate(all_edges):
+            if i not in deleted_edge_indices:
+                if i < num_l_edges:
+                    final_l_edges.append(edge)
+                else:
+                    final_r_edges.append(edge)
+                    
+        return final_l_edges, final_r_edges
+
     def _clip_edges(self, edges, prefix="Edge"):
         if not edges:
             return []
@@ -646,7 +747,7 @@ class Application(tk.Tk):
         self.comp_offset_y = (self.comp_height - self.visible_height) / 2
 
         self.title("Voronoi Diagram 600x600")
-        self.geometry(f"{self.visible_width + 250}x{self.visible_height + 50}")
+        self.geometry(f"{self.visible_width + 250}x{self.visible_height + 20}")
         self.resizable(False, False)
         
         self.points, self.voronoi_steps, self.current_step = [], [], 0
@@ -696,7 +797,6 @@ class Application(tk.Tk):
         ttk.Button(point_frame, text="Clear", command=self.clear_canvas).pack(fill=tk.X, pady=(5,0))
 
         # --- Section 2: 測資瀏覽 ---
-        
         case_nav_frame = ttk.LabelFrame(control_frame, text="2. File of test data", padding=10)
         case_nav_frame.pack(fill=tk.X, pady=(0, 10))
         
@@ -714,12 +814,8 @@ class Application(tk.Tk):
         self.case_label = ttk.Label(case_nav_frame, text="", anchor="center")
         self.case_label.pack(fill=tk.X, pady=5)
 
-        # --- Section 3: 執行演算法 ---
-        run_frame = ttk.LabelFrame(control_frame, text="3. Execute algorithm", padding=10)
-        run_frame.pack(fill=tk.X, pady=(0, 10))
-
-        # --- Section 4: 單步執行控制 ---
-        step_frame = ttk.LabelFrame(control_frame, text="3.  Execute algorithm", padding=10)
+        # --- Section 3: 演算法控制 ---
+        step_frame = ttk.LabelFrame(control_frame, text="3.  Algorithm control", padding=10)
         step_frame.pack(fill=tk.X, pady=(0, 10))
         
         nav_frame = ttk.Frame(step_frame)
@@ -727,25 +823,22 @@ class Application(tk.Tk):
 
         self.prev_button = ttk.Button(nav_frame, text="Previous step", command=self.prev_step, state=tk.DISABLED)
         self.prev_button.pack(side=tk.LEFT, expand=True, fill=tk.X)
-
-        # [MODIFIED] 按鈕文字修改
-        self.next_button = ttk.Button(nav_frame, text="Step by step", command=self.next_step) # 預設啟用
+        
+        self.next_button = ttk.Button(nav_frame, text="Step by step", command=self.next_step)
         self.next_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(5,0))
 
-        # [MODIFIED] 按鈕狀態修改，不再預設禁用
         self.autoplay_button = ttk.Button(step_frame, text="Run", command=self.start_autoplay)
         self.autoplay_button.pack(fill=tk.X, pady=(5, 0))
 
         self.step_label = ttk.Label(step_frame, text="", anchor="center")
         self.step_label.pack(fill=tk.X, pady=5)
-        
-        # --- Section 5: 匯出檔案 ---
-        export_frame = ttk.LabelFrame(control_frame, text="4. Export file(.txt)", padding=10)
+
+        # --- Section 5: 檔案操作 ---
+        export_frame = ttk.LabelFrame(control_frame, text="4. File operations", padding=10)
         export_frame.pack(fill=tk.X)
         ttk.Button(export_frame, text="Export points and line segments", command=self.export_to_file).pack(fill=tk.X)
-        
-        # --- [NEW] Section 6: 匯入檔案 ---
         ttk.Button(export_frame, text="Importing graphics from a file", command=self.import_from_file).pack(fill=tk.X, pady=(5,0))
+
 
     def _reset_to_custom_mode(self):
         if self.current_test_case_index != -1:
@@ -890,18 +983,23 @@ class Application(tk.Tk):
             endpoint_counts[edge.end.__hash__()] += 1
 
         kept_edges = []
-        for i, edge in enumerate(edges):
-            start_hash = edge.start.__hash__()
-            end_hash = edge.end.__hash__()
-            start_degree = endpoint_counts.get(start_hash, 0)
-            end_degree = endpoint_counts.get(end_hash, 0)
+        for edge in edges:
+            start_degree = endpoint_counts.get(edge.start.__hash__(), 0)
+            end_degree = endpoint_counts.get(edge.end.__hash__(), 0)
+
             is_start_on_boundary = edge.start.is_on_boundary(self.comp_width, self.comp_height)
             is_end_on_boundary = edge.end.is_on_boundary(self.comp_width, self.comp_height)
-            is_start_well_connected = start_degree > 1 or is_start_on_boundary
-            is_end_well_connected = end_degree > 1 or is_end_on_boundary
 
-            if is_start_well_connected and is_end_well_connected:
+            # Condition for DELETION:
+            # The edge is deleted only if both its endpoints have a degree of 1 (only connected
+            # to this edge) AND neither of them lies on the main computational boundary.
+            # This correctly identifies truly floating segments.
+            is_truly_isolated = (start_degree == 1 and end_degree == 1 and 
+                                 not is_start_on_boundary and not is_end_on_boundary)
+
+            if not is_truly_isolated:
                 kept_edges.append(edge)
+                
         return kept_edges
 
     def run_normal(self):
@@ -956,7 +1054,8 @@ class Application(tk.Tk):
                 left_edges=final_kept_edges,
                 right_edges=[],
                 hyperplane=[],
-                convex_hull=Polygon(points=last_step.convex_hull.points) if last_step.convex_hull else None
+                convex_hull=Polygon(points=last_step.convex_hull.points) if last_step.convex_hull else None,
+                collision_info="最終結果圖。"
             )
             self.voronoi_steps.append(cleanup_step)
 
@@ -1061,11 +1160,16 @@ class Application(tk.Tk):
         self.update_step_display()
 
     def update_step_display(self):
+        # --- Update Step Label and Buttons ---
         if not self.voronoi_steps: 
             self.step_label.config(text="點擊「下一步」開始")
             self.prev_button.config(state=tk.DISABLED)
-            #self.autoplay_button.config(state=tk.DISABLED)
-            self.next_button.config(state=tk.NORMAL) # Ensure Next is enabled at start
+            self.next_button.config(state=tk.NORMAL)
+            
+            self.info_text.config(state=tk.NORMAL)
+            self.info_text.delete("1.0", tk.END)
+            self.info_text.insert("1.0", "在此處顯示詳細的步驟資訊。")
+            self.info_text.config(state=tk.DISABLED)
             return
 
         step_record = self.voronoi_steps[self.current_step]
@@ -1075,13 +1179,44 @@ class Application(tk.Tk):
         if self.autoplay_job:
             self.prev_button.config(state=tk.DISABLED)
             self.next_button.config(state=tk.DISABLED)
-            #self.autoplay_button.config(state=tk.DISABLED)
         else:
             is_not_last_step = self.current_step < len(self.voronoi_steps) - 1
             self.prev_button.config(state=tk.NORMAL if self.current_step > 0 else tk.DISABLED)
             self.next_button.config(state=tk.NORMAL if is_not_last_step else tk.DISABLED)
-            # Enable autoplay button if there are steps and we are not at the end.
-            #self.autoplay_button.config(state=tk.NORMAL if is_not_last_step and self.voronoi_steps else tk.DISABLED)
+
+        # --- Update Info Text Box ---
+        self.info_text.config(state=tk.NORMAL)
+        self.info_text.delete("1.0", tk.END)
+
+        def to_vis(p):
+            vis_x = p.x - self.comp_offset_x
+            vis_y = p.y - self.comp_offset_y
+            return f"({vis_x:.0f}, {vis_y:.0f})"
+
+        info_content = []
+        if step_record.collision_info:
+            info_content.append(f"[日誌]\n{step_record.collision_info}\n")
+
+        info_content.append(f"--- 左側線段 (L) [{len(step_record.left_edges)}] ---")
+        if step_record.left_edges:
+            for i, edge in enumerate(step_record.left_edges): info_content.append(f"L{i}: {to_vis(edge.start)} -> {to_vis(edge.end)}")
+        else: info_content.append("(無)")
+        info_content.append("")
+
+        info_content.append(f"--- 右側線段 (R) [{len(step_record.right_edges)}] ---")
+        if step_record.right_edges:
+            for i, edge in enumerate(step_record.right_edges): info_content.append(f"R{i}: {to_vis(edge.start)} -> {to_vis(edge.end)}")
+        else: info_content.append("(無)")
+        info_content.append("")
+        
+        info_content.append(f"--- 超平面線段 (H) [{len(step_record.hyperplane)}] ---")
+        if step_record.hyperplane:
+            for i, edge in enumerate(step_record.hyperplane): info_content.append(f"H{i}: {to_vis(edge.start)} -> {to_vis(edge.end)}")
+        else: info_content.append("(無)")
+
+        self.info_text.insert("1.0", "\n".join(info_content))
+        self.info_text.config(state=tk.DISABLED)
+
 
     def clear_canvas(self):
         self.points.clear()
@@ -1094,13 +1229,13 @@ class Application(tk.Tk):
         self.next_case_button.config(state=tk.DISABLED)
         
         self.canvas.delete("all")
-        self.update_step_display() # Reset labels and buttons
+        self.update_step_display()
 
     def reset_steps(self):
         self.stop_autoplay()
         self.voronoi_steps.clear()
         self.current_step = 0
-        if hasattr(self, 'step_label'): # Check if widgets are created
+        if hasattr(self, 'step_label'):
             self.update_step_display()
 
     def draw_points(self, all_points, active_points):
@@ -1109,10 +1244,10 @@ class Application(tk.Tk):
         - all_points: All points in the problem.
         - active_points: The subset of points currently being processed.
         """
-        active_point_coords = set((round(p.x, 5), round(p.y, 5)) for p in active_points)
+        active_point_coords = set((p.__hash__()) for p in active_points)
 
         for p_comp in all_points:
-            is_active = (round(p_comp.x, 5), round(p_comp.y, 5)) in active_point_coords
+            is_active = p_comp.__hash__() in active_point_coords
             
             fill_color = "red" if is_active else "#cccccc" # Gray for inactive points
             text_color = "black" if is_active else "#999999"
